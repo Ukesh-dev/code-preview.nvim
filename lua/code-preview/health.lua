@@ -8,6 +8,23 @@ function M.check()
   local error = h.error or h.report_error
   local start = h.start or h.report_start
 
+  -- Hook shims are per-OS: .sh on Unix, .ps1 on Windows (issue #46 / ADR-0007).
+  local is_win   = vim.fn.has("win32") == 1
+  local shim_ext = is_win and ".ps1" or ".sh"
+
+  -- Report a shim/script artifact. On Windows there is no executable bit (the
+  -- hook command invokes the interpreter explicitly), so readability is the
+  -- correct check; on Unix we additionally require the executable bit.
+  local function check_script(label, path)
+    if vim.fn.filereadable(path) == 0 then
+      error(label .. " not found at " .. path)
+    elseif is_win or vim.fn.executable(path) == 1 then
+      ok(label .. (is_win and " is present" or " is executable"))
+    else
+      warn(label .. " exists but is not executable (run: chmod +x " .. path .. ")")
+    end
+  end
+
   -- ── Common ────────────────────────────────────────────────────
 
   start("code-preview.nvim")
@@ -54,11 +71,19 @@ function M.check()
 
   start("Claude Code backend")
 
-  -- jq (required by Claude Code shell hooks)
-  if vim.fn.executable("jq") == 1 then
+  -- Hook-shim dependency, reported per-OS. The Unix shims (.sh) parse JSON with
+  -- jq; the Windows shims (.ps1) use PowerShell's native ConvertFrom-Json, so jq
+  -- is irrelevant there. See issue #46.
+  if vim.fn.has("win32") == 1 then
+    if vim.fn.executable("powershell") == 1 then
+      ok("PowerShell is available (used by the Windows hook shims; built in on Windows 11)")
+    else
+      warn("powershell not found in PATH (required by the Windows hook scripts)")
+    end
+  elseif vim.fn.executable("jq") == 1 then
     ok("jq is available")
   else
-    warn("jq not found in PATH (required by Claude Code hook scripts)")
+    warn("jq not found in PATH (required by the Unix hook scripts)")
   end
 
   -- Hook scripts executable
@@ -69,36 +94,18 @@ function M.check()
   local bin = plugin_root .. "/bin"
   local claudecode_dir = plugin_root .. "/backends/claudecode"
 
-  -- Claude Code adapter scripts
-  for _, script in ipairs({
-    "code-preview-diff.sh",
-    "code-close-diff.sh",
-  }) do
-    local path = claudecode_dir .. "/" .. script
-    if vim.fn.filereadable(path) == 1 and vim.fn.executable(path) == 1 then
-      ok(script .. " is executable")
-    elseif vim.fn.filereadable(path) == 1 then
-      warn(script .. " exists but is not executable (run: chmod +x " .. path .. ")")
-    else
-      error(script .. " not found at " .. path)
-    end
+  -- Claude Code adapter scripts (per-OS shim extension)
+  for _, stem in ipairs({ "code-preview-diff", "code-close-diff" }) do
+    check_script(stem .. shim_ext, claudecode_dir .. "/" .. stem .. shim_ext)
   end
 
-  -- Shared scripts
-  for _, script in ipairs({
-    "nvim-socket.sh",
-    "nvim-call.sh",
-    "apply-edit.lua",
-    "apply-multi-edit.lua",
-  }) do
-    local path = bin .. "/" .. script
-    if vim.fn.filereadable(path) == 1 and vim.fn.executable(path) == 1 then
-      ok(script .. " is executable")
-    elseif vim.fn.filereadable(path) == 1 then
-      warn(script .. " exists but is not executable (run: chmod +x " .. path .. ")")
-    else
-      error(script .. " not found at " .. path)
-    end
+  -- Shared scripts: the discovery + RPC shims are per-OS; the apply-* workers
+  -- are Lua on every OS.
+  for _, stem in ipairs({ "nvim-socket", "nvim-call" }) do
+    check_script(stem .. shim_ext, bin .. "/" .. stem .. shim_ext)
+  end
+  for _, script in ipairs({ "apply-edit.lua", "apply-multi-edit.lua" }) do
+    check_script(script, bin .. "/" .. script)
   end
 
   -- .claude/settings.local.json
@@ -169,16 +176,13 @@ function M.check()
     warn("copilot not found in PATH (install from https://github.com/github/copilot-cli)")
   end
 
-  -- Adapter scripts
+  -- Adapter scripts (Unix only — Copilot's Windows shim is pending, issue #46)
   local copilot_dir = plugin_root .. "/backends/copilot"
-  for _, script in ipairs({ "code-preview-diff.sh", "code-close-diff.sh" }) do
-    local path = copilot_dir .. "/" .. script
-    if vim.fn.filereadable(path) == 1 and vim.fn.executable(path) == 1 then
-      ok(script .. " is executable")
-    elseif vim.fn.filereadable(path) == 1 then
-      warn(script .. " exists but is not executable (run: chmod +x " .. path .. ")")
-    else
-      error(script .. " not found at " .. path)
+  if is_win then
+    warn("Copilot CLI on Windows is not yet supported (issue #46); use Claude Code on Windows")
+  else
+    for _, stem in ipairs({ "code-preview-diff", "code-close-diff" }) do
+      check_script(stem .. ".sh", copilot_dir .. "/" .. stem .. ".sh")
     end
   end
 
@@ -201,14 +205,11 @@ function M.check()
   end
 
   local codex_dir = plugin_root .. "/backends/codex"
-  for _, script in ipairs({ "code-preview-diff.sh", "code-close-diff.sh" }) do
-    local path = codex_dir .. "/" .. script
-    if vim.fn.filereadable(path) == 1 and vim.fn.executable(path) == 1 then
-      ok(script .. " is executable")
-    elseif vim.fn.filereadable(path) == 1 then
-      warn(script .. " exists but is not executable (run: chmod +x " .. path .. ")")
-    else
-      error(script .. " not found at " .. path)
+  if is_win then
+    warn("Codex CLI on Windows is not yet supported (issue #46); use Claude Code on Windows")
+  else
+    for _, stem in ipairs({ "code-preview-diff", "code-close-diff" }) do
+      check_script(stem .. ".sh", codex_dir .. "/" .. stem .. ".sh")
     end
   end
 
