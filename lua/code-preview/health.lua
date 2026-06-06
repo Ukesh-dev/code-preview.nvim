@@ -9,8 +9,9 @@ function M.check()
   local start = h.start or h.report_start
 
   -- Hook shims are per-OS: .sh on Unix, .ps1 on Windows (issue #46 / ADR-0007).
-  local is_win   = vim.fn.has("win32") == 1
-  local shim_ext = is_win and ".ps1" or ".sh"
+  local platform = require("code-preview.platform")
+  local is_win   = platform.is_windows()
+  local shim_ext = platform.script_ext()
 
   -- Report a shim/script artifact. On Windows there is no executable bit (the
   -- hook command invokes the interpreter explicitly), so readability is the
@@ -72,78 +73,48 @@ function M.check()
   start("Claude Code backend")
 
   -- Hook-shim dependency, reported per-OS. The Unix shims (.sh) parse JSON with
-  -- jq; the Windows shims (.ps1) use PowerShell's native ConvertFrom-Json, so jq
-  -- is irrelevant there. See issue #46.
-  if vim.fn.has("win32") == 1 then
-    if vim.fn.executable("powershell") == 1 then
+  -- jq; the Windows shims (.ps1) use PowerShell's native ConvertFrom-Json. See
+  -- issue #46.
+  local dep = platform.shim_dependency()
+  if vim.fn.executable(dep) == 1 then
+    if is_win then
       ok("PowerShell is available (used by the Windows hook shims; built in on Windows 11)")
     else
-      warn("powershell not found in PATH (required by the Windows hook scripts)")
+      ok("jq is available")
     end
-  elseif vim.fn.executable("jq") == 1 then
-    ok("jq is available")
   else
-    warn("jq not found in PATH (required by the Unix hook scripts)")
+    warn(dep .. " not found in PATH (required by the hook scripts)")
   end
 
-  -- Hook scripts executable
+  -- Shared shims. The hook entry is one generic per-OS shim (bin/hook-entry,
+  -- ADR-0008); the discovery + RPC shims are per-OS too; the apply-* workers
+  -- are Lua on every OS.
   local src = debug.getinfo(1, "S").source
   local lua_file = src:sub(2)
   local lua_dir  = vim.fn.fnamemodify(lua_file, ":h")
   local plugin_root = vim.fn.fnamemodify(lua_dir, ":h:h")
   local bin = plugin_root .. "/bin"
-  local claudecode_dir = plugin_root .. "/backends/claudecode"
 
-  -- Claude Code adapter scripts (per-OS shim extension)
-  for _, stem in ipairs({ "code-preview-diff", "code-close-diff" }) do
-    check_script(stem .. shim_ext, claudecode_dir .. "/" .. stem .. shim_ext)
-  end
-
-  -- Shared scripts: the discovery + RPC shims are per-OS; the apply-* workers
-  -- are Lua on every OS.
-  for _, stem in ipairs({ "nvim-socket", "nvim-call" }) do
+  for _, stem in ipairs({ "hook-entry", "nvim-socket", "nvim-call" }) do
     check_script(stem .. shim_ext, bin .. "/" .. stem .. shim_ext)
   end
   for _, script in ipairs({ "apply-edit.lua", "apply-multi-edit.lua" }) do
     check_script(script, bin .. "/" .. script)
   end
 
-  -- .claude/settings.local.json
+  -- .claude/settings.local.json — delegate hook detection to the backend, which
+  -- matches by command *shape* (the "hook-entry" marker), not by install path.
+  -- (A previous inline re-parse keyed off "code-preview"/"claude-preview"
+  -- substrings, which mis-fired after the hook-entry rename — e.g. flagging a
+  -- fresh install as "legacy" just because the plugin lived under a
+  -- claude-preview.nvim directory.)
   local settings = vim.fn.getcwd() .. "/.claude/settings.local.json"
-  local f = io.open(settings, "r")
-  if not f then
+  if vim.fn.filereadable(settings) == 0 then
     warn(".claude/settings.local.json not found — run :CodePreviewInstallClaudeCodeHooks")
+  elseif require("code-preview.backends.claudecode").install_state().state == "installed" then
+    ok("Claude Code hooks are installed")
   else
-    local raw = f:read("*a")
-    f:close()
-    local parsed_ok, data = pcall(vim.json.decode, raw)
-    if not parsed_ok then
-      error(".claude/settings.local.json is invalid JSON")
-    elseif not (data.hooks and data.hooks.PreToolUse) then
-      warn(".claude/settings.local.json exists but code-preview hooks are not installed")
-    else
-      local found_new = false
-      local found_legacy = false
-      for _, entry in ipairs(data.hooks.PreToolUse) do
-        local cmd = ""
-        if entry.hooks and entry.hooks[1] then
-          cmd = tostring(entry.hooks[1].command or "")
-        end
-        if cmd:find("code-preview", 1, true) then
-          found_new = true
-          break
-        elseif cmd:find("claude-preview", 1, true) then
-          found_legacy = true
-        end
-      end
-      if found_new then
-        ok("Claude Code hooks are installed")
-      elseif found_legacy then
-        warn("Legacy claude-preview hooks detected — run :CodePreviewInstallClaudeCodeHooks to update")
-      else
-        warn("code-preview hooks not found — run :CodePreviewInstallClaudeCodeHooks")
-      end
-    end
+    warn("code-preview hooks not installed in .claude/settings.local.json — run :CodePreviewInstallClaudeCodeHooks")
   end
 
   -- ── OpenCode backend ──────────────────────────────────────────
@@ -176,14 +147,11 @@ function M.check()
     warn("copilot not found in PATH (install from https://github.com/github/copilot-cli)")
   end
 
-  -- Adapter scripts (Unix only — Copilot's Windows shim is pending, issue #46)
-  local copilot_dir = plugin_root .. "/backends/copilot"
+  -- Copilot uses the shared bin/hook-entry.sh (checked above) through its `bash`
+  -- hook field. On Windows that field needs git-bash, so Copilot-on-Windows is
+  -- deferred (issue #46).
   if is_win then
     warn("Copilot CLI on Windows is not yet supported (issue #46); use Claude Code on Windows")
-  else
-    for _, stem in ipairs({ "code-preview-diff", "code-close-diff" }) do
-      check_script(stem .. ".sh", copilot_dir .. "/" .. stem .. ".sh")
-    end
   end
 
   -- hooks.json installed
@@ -204,13 +172,11 @@ function M.check()
     warn("codex not found in PATH (install from https://github.com/openai/codex)")
   end
 
-  local codex_dir = plugin_root .. "/backends/codex"
+  -- Codex now uses the shared bin/hook-entry shim (checked above); no
+  -- per-backend adapter script remains. Codex-on-Windows is wired but not yet
+  -- validated end-to-end (issue #46).
   if is_win then
-    warn("Codex CLI on Windows is not yet supported (issue #46); use Claude Code on Windows")
-  else
-    for _, stem in ipairs({ "code-preview-diff", "code-close-diff" }) do
-      check_script(stem .. ".sh", codex_dir .. "/" .. stem .. ".sh")
-    end
+    warn("Codex CLI on Windows is not yet validated (issue #46); use Claude Code on Windows")
   end
 
   local codex_backend = require("code-preview.backends.codex")
