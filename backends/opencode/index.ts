@@ -56,7 +56,67 @@ const PREVIEW_TOOLS = new Set(["edit", "write", "multiedit", "bash", "apply_patc
 
 // ── Shim invocation ──────────────────────────────────────────────
 
-function runHook(event: "pre" | "post", payload: object): void {
+const HOOK_TIMEOUT_MS = 15000
+// A genuine timeout takes ~HOOK_TIMEOUT_MS; the spurious libuv timeout below
+// returns almost instantly. Anything faster than this is treated as spurious.
+const SPURIOUS_TIMEOUT_MS = 2000
+const MAX_HOOK_ATTEMPTS = 3
+
+// Run `run` (a synchronous, throwing operation — here a spawnSync), retrying a
+// SPURIOUS timeout.
+//
+// Why this exists: Node's spawnSync (used by execSync) derives its timeout
+// deadline from libuv's *cached* loop time, which is only refreshed once per
+// loop iteration. The first spawnSync that runs right after async work — here,
+// the awaited enqueueHook in the tool hooks — sees a stale "now", so
+// `now + timeout` is already in the past and libuv SIGTERMs the child the
+// instant it spawns: a spurious ETIMEDOUT that returns in ~15ms instead of 15s.
+// On Windows this drops the FIRST hook of a concurrent burst, so that file gets
+// no diff/marker (issue #46; Unix is unaffected — it execs the .sh directly and
+// doesn't hit this the same way).
+//
+// The fix: retry, but first `await` a turn of the event loop so libuv refreshes
+// its cached time — a synchronous retry would re-read the same stale value and
+// fail again (which is exactly why the *next* hook in a burst always succeeds).
+// A genuine timeout takes ~HOOK_TIMEOUT_MS, far above SPURIOUS_TIMEOUT_MS, so it
+// is never retried. `label` is used only for the diagnostic log. Exported so the
+// retry behaviour can be exercised by the test harness (it's a Windows libuv
+// quirk that can't otherwise be reproduced on CI).
+export async function runWithSpuriousRetry(
+  run: () => void,
+  label = "hook-entry",
+): Promise<void> {
+  for (let attempt = 1; attempt <= MAX_HOOK_ATTEMPTS; attempt++) {
+    const start = Date.now()
+    try {
+      run()
+      return
+    } catch (err: any) {
+      const elapsed = Date.now() - start
+      // A timeout-kill surfaces as code ETIMEDOUT and/or signal SIGTERM — Node
+      // has historically reported one or the other depending on platform — so
+      // match both, or the spurious-timeout retry could be missed where only
+      // SIGTERM is set. Still gated on elapsed < SPURIOUS_TIMEOUT_MS below, so a
+      // genuine ~15s hang (also SIGTERM'd) is never mistaken for spurious.
+      const timedOut =
+        !!err && (err.code === "ETIMEDOUT" || err.signal === "SIGTERM")
+      if (timedOut && elapsed < SPURIOUS_TIMEOUT_MS && attempt < MAX_HOOK_ATTEMPTS) {
+        // Yield so libuv refreshes its cached loop time before retrying.
+        await new Promise<void>((resolve) => setImmediate(resolve))
+        continue
+      }
+      // Abstain on any failure. Log a genuine timeout with elapsed ms so a real
+      // hang (~15s) is distinguishable from exhausted spurious retries.
+      if (timedOut) {
+        // eslint-disable-next-line no-console
+        console.debug(`[code-preview] ${label} timed out after ${elapsed}ms`)
+      }
+      return
+    }
+  }
+}
+
+async function runHook(event: "pre" | "post", payload: object): Promise<void> {
   const shim = resolveHookEntry()
   if (!shim) {
     // Surface enough breadcrumb that a misconfigured bin-path.txt isn't a
@@ -69,22 +129,15 @@ function runHook(event: "pre" | "post", payload: object): void {
   const cmd = IS_WIN
     ? `powershell -NoProfile -ExecutionPolicy Bypass -File "${shim}" opencode ${event}`
     : `"${shim}" opencode ${event}`
-  try {
+
+  await runWithSpuriousRetry(() => {
     execSync(cmd, {
       input: JSON.stringify(payload),
       env: { ...process.env, CODE_PREVIEW_BACKEND: "opencode" },
-      timeout: 15000,
+      timeout: HOOK_TIMEOUT_MS,
       stdio: ["pipe", "pipe", "pipe"],
     })
-  } catch (err: any) {
-    // Abstain on any failure. Log timeouts at debug-equivalent because
-    // a silent 15s hang is otherwise hard to diagnose; everything else
-    // is treated as best-effort and swallowed.
-    if (err && (err.code === "ETIMEDOUT" || err.signal === "SIGTERM")) {
-      // eslint-disable-next-line no-console
-      console.debug(`[code-preview] hook-entry ${event} timed out after 15s`)
-    }
-  }
+  }, `hook-entry ${event}`)
 }
 
 // ── Hook serialisation ───────────────────────────────────────────
@@ -96,9 +149,9 @@ function runHook(event: "pre" | "post", payload: object): void {
 
 let hookQueue: Promise<void> = Promise.resolve()
 
-function enqueueHook(fn: () => void): Promise<void> {
-  hookQueue = hookQueue.then(() => {
-    try { fn() } catch { /* non-fatal */ }
+function enqueueHook(fn: () => void | Promise<void>): Promise<void> {
+  hookQueue = hookQueue.then(async () => {
+    try { await fn() } catch { /* non-fatal */ }
   })
   return hookQueue
 }
@@ -116,6 +169,8 @@ const plugin: Plugin = async ({ directory }) => {
 
     "tool.execute.after": async (input, _output) => {
       if (!PREVIEW_TOOLS.has(input.tool)) return
+      // OpenCode's after-hook carries the tool args on `input` (the before-hook
+      // carries them on `output`), confirmed on the live API (issue #46).
       const args = ((input as any).args as Record<string, any>) ?? {}
       const payload = { tool: input.tool, args, cwd: directory }
       await enqueueHook(() => runHook("post", payload))
