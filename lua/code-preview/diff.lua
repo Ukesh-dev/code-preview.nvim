@@ -127,6 +127,17 @@ local function active_count()
   return n
 end
 
+local function layout_for_backend(cfg, backend)
+  local diff_cfg = (cfg and cfg.diff) or {}
+  local layouts = diff_cfg.layouts or {}
+
+  if backend and layouts[backend] then
+    return layouts[backend]
+  end
+
+  return diff_cfg.layout or "tab"
+end
+
 function M.is_open(file_path)
   if file_path and file_path ~= "" then
     local entry = active_diffs[file_path]
@@ -416,12 +427,14 @@ local function show_inline_diff(original_path, proposed_path, real_file_path, cf
   return { tab = tab, bufs = { buf }, inline_win = win }
 end
 
-function M.show_diff(original_path, proposed_path, real_file_path, abs_file_path, action)
+function M.show_diff(original_path, proposed_path, real_file_path, abs_file_path, action, backend)
   local file_key = abs_file_path or real_file_path
   local cfg = require("code-preview").config
-  log.info(log.fmt("show_diff: file=%s layout=%s active=%d",
+  local layout = layout_for_backend(cfg, backend)
+  log.info(log.fmt("show_diff: file=%s layout=%s backend=%s active=%d",
     file_key or "nil",
-    (cfg.diff and cfg.diff.layout) or "tab",
+    layout,
+    backend or "nil",
     active_count()))
 
   -- If a diff for this SAME file is already open, close it first (re-edit)
@@ -434,7 +447,7 @@ function M.show_diff(original_path, proposed_path, real_file_path, abs_file_path
   mark_change_and_reveal(abs_file_path, action)
 
   -- Inline layout
-  if cfg.diff.layout == "inline" then
+  if layout == "inline" then
     local result = show_inline_diff(original_path, proposed_path, real_file_path, cfg)
     active_diffs[file_key] = result
     -- Force terminal redraw so RPC-triggered tab creation is visible (see force_redraw).
@@ -449,7 +462,7 @@ function M.show_diff(original_path, proposed_path, real_file_path, abs_file_path
   local labels = cfg.diff.labels or { current = "CURRENT", proposed = "PROPOSED" }
   local ft = vim.filetype.match({ filename = real_file_path }) or ""
 
-  if cfg.diff.layout == "vsplit" then
+  if layout == "vsplit" then
     vim.cmd("vsplit")
   else
     vim.cmd("tabnew")

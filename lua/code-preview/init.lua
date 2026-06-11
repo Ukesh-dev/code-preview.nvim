@@ -7,6 +7,7 @@ local default_config = {
   debug = false,  -- enable debug logging to stdpath("log")/code-preview.log
   diff = {
     layout = "tab",        -- "tab", "vsplit", or "inline"
+    layouts = {},          -- override layout per backend: { opencode = "tab", codex = "vsplit" }
     labels = { current = "CURRENT", proposed = "PROPOSED" },
     equalize = true,
     full_file = true,

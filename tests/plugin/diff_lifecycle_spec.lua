@@ -213,12 +213,15 @@ describe("diff lifecycle", function()
 end)
 
 describe("diff layouts", function()
-  -- Temporarily override the diff layout for one test, restoring it afterwards.
-  local function with_layout(layout, fn)
+  -- Temporarily override diff layout config for one test, restoring it afterwards.
+  local function with_layout(layout, fn, layouts)
     local saved = require("code-preview").config.diff.layout
+    local saved_layouts = vim.deepcopy(require("code-preview").config.diff.layouts or {})
     require("code-preview").config.diff.layout = layout
+    require("code-preview").config.diff.layouts = layouts or {}
     local ok, err = pcall(fn)
     require("code-preview").config.diff.layout = saved
+    require("code-preview").config.diff.layouts = saved_layouts
     if not ok then error(err, 2) end
   end
 
@@ -284,6 +287,47 @@ describe("diff layouts", function()
     -- But only ONE window — no CURRENT/PROPOSED split
     local diff_tabpage = vim.api.nvim_get_current_tabpage()
     assert.equals(1, #vim.api.nvim_tabpage_list_wins(diff_tabpage))
+
+    diff.close_diff()
+    os.remove(orig)
+    os.remove(prop)
+  end)
+
+  it("backend layout override wins over the default layout", function()
+    local orig = tmp_file("backend_vs_orig.txt", "alpha\nbeta")
+    local prop = tmp_file("backend_vs_prop.txt", "alpha\ngamma")
+
+    local tabs_before = #vim.api.nvim_list_tabpages()
+    local tab = vim.api.nvim_get_current_tabpage()
+    local wins_before = #vim.api.nvim_tabpage_list_wins(tab)
+
+    with_layout("tab", function()
+      diff.show_diff(orig, prop, "layout_backend_vsplit.txt", nil, nil, "codex")
+    end, { codex = "vsplit" })
+
+    assert.is_true(diff.is_open())
+    assert.equals(tabs_before, #vim.api.nvim_list_tabpages())
+    assert.equals(wins_before + 2, #vim.api.nvim_tabpage_list_wins(tab))
+
+    diff.close_diff()
+    os.remove(orig)
+    os.remove(prop)
+  end)
+
+  it("missing backend falls back to the default layout", function()
+    local orig = tmp_file("no_backend_orig.txt", "alpha\nbeta")
+    local prop = tmp_file("no_backend_prop.txt", "alpha\ngamma")
+
+    local tabs_before = #vim.api.nvim_list_tabpages()
+
+    with_layout("tab", function()
+      diff.show_diff(orig, prop, "layout_no_backend.txt")
+    end, { codex = "vsplit" })
+
+    assert.is_true(diff.is_open())
+    assert.equals(tabs_before + 1, #vim.api.nvim_list_tabpages())
+    local diff_tabpage = vim.api.nvim_get_current_tabpage()
+    assert.equals(2, #vim.api.nvim_tabpage_list_wins(diff_tabpage))
 
     diff.close_diff()
     os.remove(orig)

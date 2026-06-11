@@ -146,7 +146,7 @@ M.display_path = display_path  -- exposed for testing
 -- to diff.show_diff (or skip when visible_only excludes the file). The only
 -- per-tool variation is how `proposed_content` is computed, so each handler
 -- below is a one-liner around this helper.
-local function present_single_file(file_path, proposed_content, input, cfg)
+local function present_single_file(file_path, proposed_content, input, cfg, backend)
   local id = next_id()
   local orig = tmpdir() .. "/code-preview-diff-original-" .. id
   local prop = tmpdir() .. "/code-preview-diff-proposed-" .. id
@@ -159,10 +159,10 @@ local function present_single_file(file_path, proposed_content, input, cfg)
     return
   end
 
-  diff.show_diff(orig, prop, display_path(file_path, input.cwd), file_path, nil)
+  diff.show_diff(orig, prop, display_path(file_path, input.cwd), file_path, nil, backend)
 end
 
-local function handle_edit(input, cfg)
+local function handle_edit(input, cfg, backend)
   local fp = input.tool_input.file_path
   local content = apply_edit.apply(
     fp,
@@ -170,18 +170,18 @@ local function handle_edit(input, cfg)
     input.tool_input.new_string or "",
     input.tool_input.replace_all == true
   )
-  present_single_file(fp, content, input, cfg)
+  present_single_file(fp, content, input, cfg, backend)
 end
 
-local function handle_write(input, cfg)
+local function handle_write(input, cfg, backend)
   local fp = input.tool_input.file_path
-  present_single_file(fp, input.tool_input.content or "", input, cfg)
+  present_single_file(fp, input.tool_input.content or "", input, cfg, backend)
 end
 
-local function handle_multi_edit(input, cfg)
+local function handle_multi_edit(input, cfg, backend)
   local fp = input.tool_input.file_path
   local content = apply_multi_edit.apply(fp, input.tool_input.edits or {})
-  present_single_file(fp, content, input, cfg)
+  present_single_file(fp, content, input, cfg, backend)
 end
 
 local function handle_bash(input)
@@ -214,7 +214,7 @@ local function handle_bash(input)
   end
 end
 
-local function handle_apply_patch(input, cfg)
+local function handle_apply_patch(input, cfg, backend)
   local patch_text = input.tool_input and input.tool_input.patch_text
   if not patch_text or patch_text == "" then
     log.info("pre_tool: ApplyPatch with empty patch_text")
@@ -250,7 +250,7 @@ local function handle_apply_patch(input, cfg)
       -- whatever the model wrote in the `*** Update File:` directive, and some
       -- codex models (e.g. GPT 5.3) write an absolute path there, which would
       -- render the tab as `D:\...` instead of a cwd-relative label.
-      diff.show_diff(orig, prop, display_path(file.path, input.cwd), file.path, file.action)
+      diff.show_diff(orig, prop, display_path(file.path, input.cwd), file.path, file.action, backend)
     else
       log.info(log.fmt("pre_tool: ApplyPatch skip %s (visible_only)", file.rel_path))
     end
@@ -261,7 +261,7 @@ local dispatchers = {
   Edit       = handle_edit,
   Write      = handle_write,
   MultiEdit  = handle_multi_edit,
-  Bash       = function(input, _cfg) handle_bash(input) end,
+  Bash       = function(input, _cfg, _backend) handle_bash(input) end,
   ApplyPatch = handle_apply_patch,
 }
 
@@ -280,7 +280,7 @@ function M.handle(raw, backend)
 
   local fn = dispatchers[tool_name]
   if fn then
-    local ok, err = pcall(fn, input, cfg)
+    local ok, err = pcall(fn, input, cfg, backend)
     if not ok then
       log.error("pre_tool: dispatch failed: " .. tostring(err))
     end
