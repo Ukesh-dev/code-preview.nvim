@@ -51,7 +51,8 @@ local default_config = {
     proposed = {
       DiffAdd    = { bg = "#2e4c2e" },
       DiffDelete = { bg = "#4c2e2e" },
-      DiffChange = { bg = "#2e3c4c" },
+      -- DiffChange = { bg = "#2e3c4c" },
+      DiffChange = { bg = "#bada55" },
       DiffText   = { bg = "#3e5c3e" },
     },
     inline = {
